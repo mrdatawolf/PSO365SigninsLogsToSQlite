@@ -2,18 +2,27 @@ if (-not (Get-Module -ListAvailable -Name PSSQLite)) {
     Install-Module -Name PSSQLite -Scope CurrentUser
 }
 Import-Module PSSQLite
-
-$jsonFolderPath = "S:\PBIData\Biztech\Failed_Logins\NonInteractive_Signins\"
+# These are the variables that are used in the script
+$primaryDirectory = "S:\PBIData\Biztech\O365 Signins"
+$databaseName = "O365logins.sqlite3"
 $tableName = "NonInteractive"
-$dbDirectory = [System.Environment]::GetEnvironmentVariable('SQLITEPATH')
-if (-not $dbDirectory) {
-    $dbDirectory = "C:\Windows\Temp\JSON"
-    if (-not (Test-Path $dbDirectory)) {
-        New-Item -Path $dbDirectory -ItemType Directory | Out-Null
-    }
-}
-$dbPath = Join-Path -Path $dbDirectory -ChildPath "o365logins.sqlite3"
 
+#you shouldn't need change anythign below here.
+$jsonFolderPath = Join-Path $primaryDirectory $tableName
+$mainFinishedFolderPath = Join-Path $primaryDirectory "Finished"
+$finishedFolderPath = Join-Path $mainFinishedFolderPath $tableName
+if (-not (Test-Path $mainFinishedFolderPath)) {
+    New-Item -Path $mainFinishedFolderPath -ItemType Directory | Out-Null
+}
+if (-not (Test-Path $finishedFolderPath)) {
+    New-Item -Path $finishedFolderPath -ItemType Directory | Out-Null
+}
+
+$dbDirectory = $primaryDirectory
+if (-not (Test-Path $dbDirectory)) {
+    New-Item -Path $dbDirectory -ItemType Directory | Out-Null
+}
+$dbPath = Join-Path -Path $dbDirectory -ChildPath $databaseName
 $logFilePath = Join-Path -Path $dbDirectory -ChildPath "debug_$tableName.log"
 
 function Initialize-Database {
@@ -116,26 +125,28 @@ function Log-Error {
     Add-Content -Path $logFilePath -Value $logMessage
 }
 
-# Initialize database
 Initialize-Database -dbPath $dbPath
 Initialize-Table -dbPath $dbPath -tableName $tableName
-
+$connection = New-Object System.Data.SQLite.SQLiteConnection("Data Source=$dbPath;Version=3;")
+$connection.Open()
+Invoke-SqliteQuery -Query "PRAGMA synchronous = OFF;" -Connection $connection
+Invoke-SqliteQuery -Query "PRAGMA journal_mode = MEMORY;" -Connection $connection
+Invoke-SqliteQuery -Query "PRAGMA busy_timeout = 1000;" -Connection $connection
+$jsonFiles = Get-ChildItem -Path $jsonFolderPath -Filter *.json -Recurse
+$transaction = $connection.BeginTransaction()
 
 try {
-    # Create and open the connection to the SQLite database
-    $connection = New-Object System.Data.SQLite.SQLiteConnection("Data Source=$dbPath;Version=3;")
-    $connection.Open()
-
-    # Get all JSON files in the folder
-    $jsonFiles = Get-ChildItem -Path $jsonFolderPath -Filter *.json -Recurse
-
-    # Loop through each JSON file
+    $batchSize = 100000
+    $counter = 0
     foreach ($file in $jsonFiles) {
-        # Read the JSON file
         $jsonContent = Get-Content -Path $file.FullName -Raw | ConvertFrom-Json
-
-        # Loop through each record in the JSON file
+        $totalRecords = $jsonContent.Count
+        $currentRecord = 0
         foreach ($record in $jsonContent) {
+            $currentRecord++
+            if ($currentRecord % 100 -eq 0) {
+                Write-Progress -Activity "Processing file: $($file.FullName)" -Status "Processing record $currentRecord of $totalRecords" -PercentComplete (($currentRecord / $totalRecords) * 100)
+            }
             # Escape single quotes in the failureReason field
             $failureReason = $record.status.failureReason -replace "'", "''"
 
@@ -147,9 +158,7 @@ try {
                 Write-Host $checkQuery
             }
             
-
             if ($exists -eq 0) {
-                # Insert the record into the SQLite database
                 $query = @"
                 INSERT INTO $tableName (
                     id, createdDateTime, userDisplayName, userPrincipalName, userId, appId, appDisplayName, ipAddress, clientAppUsed, userAgent, correlationId, conditionalAccessStatus, originalRequestId, isInteractive, tokenIssuerName, tokenIssuerType, clientCredentialType, processingTimeInMilliseconds, riskDetail, riskLevelAggregated, riskLevelDuringSignIn, riskState, resourceDisplayName, resourceId, resourceTenantId, homeTenantId, homeTenantName, authenticationRequirement, signInIdentifier, signInIdentifierType, servicePrincipalName, userType, flaggedForReview, isTenantRestricted, autonomousSystemNumber, crossTenantAccessType, uniqueTokenIdentifier, incomingTokenType, authenticationProtocol, signInTokenProtectionStatus, originalTransferMethod, isThroughGlobalSecureAccess, globalSecureAccessIpAddress, sessionId, appOwnerTenantId, resourceOwnerTenantId, status_errorCode, status_failureReason, status_additionalDetails, deviceDetail_deviceId, deviceDetail_displayName, deviceDetail_operatingSystem, deviceDetail_browser, deviceDetail_isCompliant, deviceDetail_isManaged, deviceDetail_trustType, location_city, location_state, location_countryOrRegion, location_geoCoordinates_latitude, location_geoCoordinates_longitude
@@ -164,10 +173,30 @@ try {
                     Log-Error "Query: $query"
                 }
             }
+            $counter++
+            if ($counter % $batchSize -eq 0) {
+                $transaction.Commit()
+                $transaction = $connection.BeginTransaction()
+            }
         }
+        # Determine the relative path of the file within $jsonFolderPath
+        $relativePath = $file.FullName.Substring($jsonFolderPath.Length + 1)
+        $destinationPath = Join-Path $finishedFolderPath $relativePath
+
+        # Ensure the destination directory exists
+        $destinationDirectory = Split-Path $destinationPath -Parent
+        if (-not (Test-Path $destinationDirectory)) {
+            New-Item -Path $destinationDirectory -ItemType Directory
+        }
+
+        # Move the file to the corresponding subfolder in $finishedFolderPath
+        Move-Item -Path $file.FullName -Destination $destinationPath
     }
+    $transaction.Commit()
+} catch {
+    $transaction.Rollback()
+    Log-Error "Transaction failed: $_"
 } finally {
-    # Ensure the connection is closed
     if ($connection) {
         $connection.Close()
     }
