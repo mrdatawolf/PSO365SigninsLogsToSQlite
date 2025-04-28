@@ -3,11 +3,11 @@ if (-not (Get-Module -ListAvailable -Name PSSQLite)) {
 }
 Import-Module PSSQLite
 # These are the variables that are used in the script
-$primaryDirectory = "E:\Projects\Data\O365 Signins"
+$primaryDirectory = "S:\PBIData\Biztech\O365 Signins"
 $databaseName = "O365logins.sqlite3"
 $tableNames = @("Interactive", "NonInteractive")
 $batchSize = 1000
-#you shouldn't need change anythign below here.
+#you shouldn't need change anything below here.
 
 function Initialize-Database {
     param (
@@ -138,29 +138,22 @@ foreach($tableName in $tableNames) {
     Invoke-SqliteQuery -Query "PRAGMA journal_mode = MEMORY;" -Connection $connection
     Invoke-SqliteQuery -Query "PRAGMA busy_timeout = 100;" -Connection $connection
     $jsonFiles = Get-ChildItem -Path $jsonFolderPath -Filter *.json -Recurse
-    #$transaction = $connection.BeginTransaction()
 
     try {
         foreach ($file in $jsonFiles) {
-            #Write-Host "Processing file: $($file.FullName)"
             $jsonContent = Get-Content -Path $file.FullName -Raw | ConvertFrom-Json
             $totalRecords = $jsonContent.Count
             $currentRecord = 0
             foreach ($record in $jsonContent) {
                 $currentRecord++
-                #Write-Host "Processing record $currentRecord of $totalRecords"
                 if ($currentRecord % 100 -eq 0) {
                     Write-Progress -Activity "Processing file: $($file.FullName)" -Status "Processing record $currentRecord of $totalRecords" -PercentComplete (($currentRecord / $totalRecords) * 100)
                 }
                 # Escape single quotes in the failureReason field
                 $failureReason = $record.status.failureReason -replace "'", "''"
-    
-                # Check if the id already exists
                 $checkQuery = "SELECT COUNT(*) FROM $tableName WHERE id = '$($record.id)';"
                 try {
-                    #Write-Host "Executing query: $checkQuery"
                     $exists = Invoke-SqliteQuery -DataSource $dbPath -Query $checkQuery -As SingleValue
-                    #Write-Host "Query result: $exists"
                 } catch {
                     Write-ErrorLog "Error executing query: $checkQuery"
                     Write-ErrorLog $_.Exception.Message
@@ -175,9 +168,7 @@ foreach($tableName in $tableNames) {
                     );
 "@
                     try {
-                        #Write-Host "Executing insert query: $query"
                         Invoke-SqliteQuery -DataSource $dbPath -Query $query
-                        #Write-Host "Insert successful"
                     } catch {
                         #Write-Host "Error executing insert query: $query"
                         #Write-Host $_.Exception.Message
@@ -189,14 +180,11 @@ foreach($tableName in $tableNames) {
             # Determine the relative path of the file within $jsonFolderPath
             $relativePath = $file.FullName.Substring($jsonFolderPath.Length + 1)
             $destinationPath = Join-Path $finishedFolderPath $relativePath
-    
-            # Ensure the destination directory exists
             $destinationDirectory = Split-Path $destinationPath -Parent
             if (-not (Test-Path $destinationDirectory)) {
                 New-Item -Path $destinationDirectory -ItemType Directory
             }
     
-            # Move the file to the corresponding subfolder in $finishedFolderPath
             Move-Item -Path $file.FullName -Destination $destinationPath
         }
     } catch {
